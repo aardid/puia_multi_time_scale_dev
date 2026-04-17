@@ -850,19 +850,65 @@ class Feature(object):
         self.dto=(1.-self.overlap)*self.dtw
 
         # multi-resolution scales
-        # scales: list of (window_days, resample_minutes) tuples, or None for legacy behavior
         self.scales=None
         if scales is not None and len(scales) > 0:
             self._init_scales(scales)
-    def _init_scales(self, scales):
+    def _init_scales(self, scales, target_samples=288):
         """ Build per-scale configuration dicts for multi-resolution feature extraction.
-            Parameters:
-            -----------
-            scales : list of tuples
-                Each tuple is (window_days, resample_minutes).
+
+            The ``scales`` parameter controls how many temporal resolutions are used
+            and how far back each one looks.  There are three ways to specify it:
+
+            1. **List of numbers** (simplest) -- each entry is a lookback window in
+               days.  The resampling interval is computed automatically so that every
+               scale produces roughly the same number of samples per window
+               (``target_samples``, default 288).
+
+               >>> scales = [2, 14, 60, 180]
+               # 2d@10min (288 samp), 14d@70min (288), 60d@5h (288), 180d@15h (288)
+
+            2. **List of tuples** -- each entry is ``(window_days, resample_minutes)``,
+               giving full manual control over both the lookback and the resolution.
+
+               >>> scales = [(2, 10), (14, 60), (60, 360)]
+               # 2d@10min (288 samp), 14d@1h (336), 60d@6h (240)
+
+            3. **Mixed list** -- numbers and tuples can be combined.  Numbers use
+               the automatic ratio; tuples override it.
+
+               >>> scales = [2, (14, 60), 60]
+
+            Parameters
+            ----------
+            scales : list
+                Each element is either a number (window in days) or a tuple
+                ``(window_days, resample_minutes)``.
+            target_samples : int, optional
+                When a scale is given as a single number, the resampling interval
+                is chosen so the window contains approximately this many samples.
+                Default is 288 (matches the base 2-day @ 10-min scale).
         """
         self.scales=[]
-        for idx, (win_days, resample_min) in enumerate(scales):
+        # normalise entries: number -> (win_days, auto_resample_min)
+        normalised=[]
+        for entry in scales:
+            if isinstance(entry, (list, tuple)):
+                normalised.append((float(entry[0]), float(entry[1])))
+            else:
+                win_days=float(entry)
+                # resample_min = window_days * minutes_per_day / target_samples
+                resample_min=win_days*24*60/target_samples
+                # round to a clean value: nearest 10min if <60, nearest 60 if <1440, else nearest 1440
+                if resample_min < 60:
+                    resample_min=max(10, round(resample_min/10)*10)
+                elif resample_min < 1440:
+                    resample_min=max(60, round(resample_min/60)*60)
+                else:
+                    resample_min=max(1440, round(resample_min/1440)*1440)
+                normalised.append((win_days, resample_min))
+
+        for idx, (win_days, resample_min) in enumerate(normalised):
+            resample_min=int(resample_min)
             dt_sec=resample_min*60
             samples_per_day=24*60/resample_min
             iw=int(win_days*samples_per_day)
