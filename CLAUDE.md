@@ -65,10 +65,21 @@ Features are extracted per-year and concatenated. Subsequent runs load from cach
 
 ### Multi-resolution scales
 
-The `scales` parameter accepts a list of `(window_days, resample_minutes)` tuples:
+The `scales` parameter enables multi-timescale feature extraction. It accepts three formats:
+
 ```python
-scales=[(2, 10), (14, 60), (60, 360)]  # fine/mid/coarse
+# 1. List of days (simplest) — resampling auto-computed to keep ~288 samples per window
+scales = [2, 14, 60, 180]
+
+# 2. List of (window_days, resample_minutes) tuples — full manual control
+scales = [(2, 10), (14, 60), (60, 360)]
+
+# 3. Mixed — numbers and tuples can be combined
+scales = [2, (14, 60), 60]
 ```
+
+When a scale is given as a single number, the resampling interval is chosen automatically to keep approximately 288 samples per window (matching the base 2-day @ 10-min scale). The ratio is `resample_min = window_days * 5`, rounded to a clean interval (nearest 10min, 1hr, or 1day).
+
 Each scale resamples raw data to coarser resolution before windowing and tsfresh extraction. Features are prefixed (`s0__`, `s1__`, etc.) and concatenated horizontally. Coarser scales are forward-filled to align with the finest scale's time index. `scales=None` preserves legacy single-scale behavior.
 
 ## External data paths
@@ -89,7 +100,7 @@ fm = ForecastModel(
     data='WIZ', root='my_run',
     data_streams=['zsc2_rsam', 'zsc2_dsarF'],
     data_dir=DATA_DIR, feature_dir=FEAT_DIR,
-    scales=None  # or [(2, 10), (14, 60)]
+    scales=None  # or [2, 14, 60] or [(2, 10), (14, 60)]
 )
 fm.train(ti='2012-01-01', tf='2019-01-01', Ncl=300, Nfts=20, classifier='DT',
          drop_features=['linear_trend_timewise', 'agg_linear_trend'])
