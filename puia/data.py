@@ -13,7 +13,10 @@ from inspect import getfile, currentframe
 import pandas as pd
 from multiprocessing import Pool
 from time import sleep
-from scipy.integrate import cumtrapz
+try:
+    from scipy.integrate import cumulative_trapezoid as cumtrapz
+except ImportError:
+    from scipy.integrate import cumtrapz
 from scipy.stats import mode
 
 from .utilities import datetimeify, load_dataframe, save_dataframe, DummyClass
@@ -304,18 +307,30 @@ class Data(object):
             return
         # load data
         self._df=load_dataframe(self.file, index_col=0, parse_dates=[0,], infer_datetime_format=True)
+        # ensure index is datetime
+        if not pd.api.types.is_datetime64_any_dtype(self._df.index):
+            try:
+                self._df.index=pd.to_datetime(self._df.index, format='ISO8601')
+            except (ValueError, TypeError):
+                try:
+                    self._df.index=pd.to_datetime(self._df.index, dayfirst=True)
+                except (ValueError, TypeError):
+                    self._df.index=pd.to_datetime(self._df.index, format='mixed', dayfirst=True)
         self._df_loaded=True
         self.data_streams=list(self.df.columns)
-        
+
         # guard clause: empty dataframe
         if len(self.df.index)==0:
             return
         # assess data
         self.ti=self.df.index[0]
         self.tf=self.df.index[-1]
-        md,cnt=mode(self.df.index[1:]-self.df.index[:-1])
-        self.dt=md[0]
-        if cnt[0] != (self.df.shape[0]-1):
+        md_result=mode(self.df.index[1:]-self.df.index[:-1])
+        md=md_result.mode
+        cnt=md_result.count
+        self.dt=md if np.ndim(md)==0 else md[0]
+        cnt_val=cnt if np.ndim(cnt)==0 else cnt[0]
+        if cnt_val != (self.df.shape[0]-1):
             warnings.warn('non-uniform sampling detected in {:s}'.format(self.file)) 
         
         # remove timezone awareness
@@ -701,6 +716,239 @@ class GeneralData(Data):
         file=f'{station}_{name}_data.csv'
         super(GeneralData,self).__init__(station, parent, data_dir, file, transforms, headers_only)
 
+class MultiSourceData(object):
+    """Load and merge multiple data types for a single station.
+
+    Combines seismic, gas, GNSS, temperature, etc. into one DataFrame.
+    Coarser data is forward-filled onto the finest time grid.
+
+    Parameters
+    ----------
+    station : str
+        Station code (e.g. 'COPZ').
+    sources : dict
+        ``{source_type: column_list}`` where *source_type* matches the
+        file pattern ``{station}_{source_type}_data.csv`` and *column_list*
+        selects columns from that file. Columns in the merged DataFrame are
+        prefixed ``{source_type}_{col}`` to avoid collisions.
+        Use ``None`` as column_list to load all columns from that source.
+    parent : object, optional
+        Parent ForecastModel (provides data_streams attribute).
+    data_dir : str, optional
+        Directory containing the CSV files.
+    transforms : list, optional
+        Transform-prefixed data stream names (applied after merge).
+    """
+    def __init__(self, station, sources, parent=None, data_dir=None, transforms=None):
+        self._station_name=station
+        self._station=Station(station)
+        self.parent=parent
+        self.data_dir=data_dir
+        self.sources=sources
+        self.n_jobs=6
+        self._df_loaded=False
+        self._df=None
+        self._ti=None
+        self._tf=None
+        self._dt=None
+
+        if self.data_dir is not None:
+            self._wd=lambda x: os.sep.join([self.data_dir,x])
+        else:
+            self._wd=lambda x: os.sep.join(getfile(currentframe()).split(os.sep)[:-2]+['data',x])
+
+        # load eruption record
+        eruptionfile=self._wd(station+'_eruptive_periods.txt')
+        if not os.path.isfile(eruptionfile):
+            self.eruption_record=None
+        else:
+            self.eruption_record=EruptionRecord(eruptionfile)
+
+        # discover available columns per source (without loading full data)
+        self._source_files={}
+        self._source_columns={}
+        for src_type, cols in self.sources.items():
+            fname=f'{station}_{src_type}_data.csv'
+            fpath=self._wd(fname)
+            if not os.path.isfile(fpath):
+                raise FileNotFoundError(f'could not find {fpath}')
+            self._source_files[src_type]=fpath
+            with open(fpath, 'r') as fp:
+                header_cols=[c.strip() for c in fp.readline().strip().split(',')[1:]]
+            self._source_columns[src_type]=header_cols
+
+        # build data_streams list with prefixes
+        self.data_streams=[]
+        self._stream_to_source={}
+        for src_type, cols in self.sources.items():
+            available=self._source_columns[src_type]
+            if cols is None:
+                cols=available
+            for col in cols:
+                raw_col=col
+                # handle transform prefix: 'zsc2_rsam' -> transform='zsc2', base='rsam'
+                if '_' in col:
+                    parts=col.split('_', 1)
+                    from .transforms import transform_functions
+                    if parts[0] in transform_functions:
+                        raw_col=parts[1]
+                prefixed=f'{src_type}_{col}'
+                self.data_streams.append(prefixed)
+                self._stream_to_source[prefixed]=(src_type, col, raw_col)
+
+    def _load(self):
+        if self._df_loaded:
+            return
+        from .transforms import transform_functions
+
+        dfs={}
+        for src_type, fpath in self._source_files.items():
+            df=pd.read_csv(fpath, index_col=0)
+            # parse index as datetime, trying ISO8601 first then mixed
+            try:
+                df.index=pd.to_datetime(df.index, format='ISO8601')
+            except (ValueError, TypeError):
+                try:
+                    df.index=pd.to_datetime(df.index, dayfirst=True)
+                except (ValueError, TypeError):
+                    df.index=pd.to_datetime(df.index, format='mixed', dayfirst=True)
+            # make timezone-unaware
+            if hasattr(df.index, 'tz') and df.index.tz is not None:
+                df.index=df.index.tz_convert('UTC').tz_localize(None)
+            # normalise column names to lowercase
+            df.columns=[c.strip().lower() for c in df.columns]
+            dfs[src_type]=df
+
+        # find finest resolution among sources
+        finest_dt=None
+        finest_src=None
+        for src_type, df in dfs.items():
+            if len(df.index) < 2:
+                continue
+            md=pd.Series(df.index[1:]-df.index[:-1]).mode()[0]
+            if finest_dt is None or md < finest_dt:
+                finest_dt=md
+                finest_src=src_type
+        self.dt=finest_dt
+
+        # build combined index from finest-resolution source
+        base_index=dfs[finest_src].index
+
+        # merge all sources: prefix columns, forward-fill coarser onto fine grid
+        merged_dfs=[]
+        for src_type, df in dfs.items():
+            cols_to_use=self.sources[src_type]
+            if cols_to_use is None:
+                cols_to_use=list(df.columns)
+            else:
+                # strip transform prefix to get raw column names
+                raw_cols=[]
+                for col in cols_to_use:
+                    if '_' in col:
+                        parts=col.split('_', 1)
+                        if parts[0] in transform_functions:
+                            raw_cols.append(parts[1].lower())
+                            continue
+                    raw_cols.append(col.lower())
+                cols_to_use=list(set(raw_cols))
+
+            # select available columns
+            available=[c for c in cols_to_use if c in df.columns]
+            if not available:
+                warnings.warn(f'No matching columns in {src_type} data for {self._station_name}')
+                continue
+            sub=df[available].copy()
+            # prefix columns
+            sub.columns=[f'{src_type}_{c}' for c in sub.columns]
+            # reindex to finest grid with forward-fill
+            if src_type != finest_src:
+                sub=sub.reindex(base_index, method='ffill')
+            merged_dfs.append(sub)
+
+        self._df=pd.concat(merged_dfs, axis=1)
+
+        # apply transforms to create derived columns
+        for stream_name, (src_type, col_spec, raw_col) in self._stream_to_source.items():
+            if stream_name in self._df.columns:
+                continue
+            # check if this is a transform
+            if '_' in col_spec:
+                parts=col_spec.split('_', 1)
+                if parts[0] in transform_functions:
+                    tf_name=parts[0]
+                    base_col=f'{src_type}_{parts[1].lower()}'
+                    if base_col in self._df.columns:
+                        self._df[stream_name]=transform_functions[tf_name](self._df[base_col])
+
+        self._df_loaded=True
+        if len(self._df.index) > 0:
+            self._ti=self._df.index[0]
+            self._tf=self._df.index[-1]
+
+    def _get_df(self):
+        if not self._df_loaded:
+            self._load()
+        return self._df
+    df=property(_get_df)
+
+    def _get_ti(self):
+        if self._ti is None and not self._df_loaded:
+            self._load()
+        return self._ti
+    def _set_ti(self, val):
+        self._ti=val
+    ti=property(_get_ti, _set_ti)
+
+    def _get_tf(self):
+        if self._tf is None and not self._df_loaded:
+            self._load()
+        return self._tf
+    def _set_tf(self, val):
+        self._tf=val
+    tf=property(_get_tf, _set_tf)
+
+    def _get_dt(self):
+        if self._dt is None and not self._df_loaded:
+            self._load()
+        return self._dt
+    def _set_dt(self, val):
+        self._dt=val
+    dt=property(_get_dt, _set_dt)
+
+    def _get_station(self):
+        return self._station_name
+    station=property(_get_station)
+
+    def _get_tes(self):
+        if self.eruption_record is None:
+            return None
+        return [e.date for e in self.eruption_record.eruptions]
+    tes=property(_get_tes)
+
+    def get_data(self, ti=None, tf=None):
+        if ti is None:
+            ti=self.ti
+        if tf is None:
+            tf=self.tf
+        ti=datetimeify(ti)
+        tf=datetimeify(tf)
+        inds=(self.df.index>=ti)&(self.df.index<tf)
+        return self.df.loc[inds]
+
+    def _is_eruption_in(self, days, from_time):
+        for te in self.tes:
+            if 0 < (te-from_time).total_seconds()/(3600*24) < days:
+                return 1.
+        return 0.
+
+    def __repr__(self):
+        if self.ti is not None:
+            tm=[self.ti.year, self.ti.month, self.ti.day]
+            tm+=[self.tf.year, self.tf.month, self.tf.day]
+            srcs=', '.join(self.sources.keys())
+            return f'MultiSourceData({self._station_name}, [{srcs}]):{tm[0]}/{tm[1]:02d}/{tm[2]:02d} to {tm[3]}/{tm[4]:02d}/{tm[5]:02d}'
+        return f'MultiSourceData({self._station_name}, not loaded)'
+
 class Eruption(object):
     def __init__(self, date):
         self.date=datetimeify(date)
@@ -969,7 +1217,7 @@ def _check_data(df):
         else:
             print('there are duplicated indices')
             return True
-        if df.index.is_monotonic:
+        if df.index.is_monotonic_increasing:
             # check indices in order
             pass
         else:

@@ -63,13 +63,16 @@ def save_dataframe(df, fl, index=True, index_label=None):
     else:
         raise ValueError('only csv, hdf and pkl file formats supported')
 
-def load_dataframe(fl, index_col=None, parse_dates=False, usecols=None, infer_datetime_format=False, 
-    nrows=None, header='infer', skiprows=None):
+def load_dataframe(fl, index_col=None, parse_dates=False, usecols=None, infer_datetime_format=False,
+    nrows=None, header='infer', skiprows=None, dayfirst=True):
     ''' helper function for loading dataframes
     '''
     if fl.endswith('.csv'):
-        df = pd.read_csv(fl, index_col=index_col, parse_dates=parse_dates, usecols=usecols, infer_datetime_format=infer_datetime_format,
-            nrows=nrows, header=header, skiprows=skiprows, dayfirst=True)
+        kw = dict(index_col=index_col, parse_dates=parse_dates, usecols=usecols,
+            nrows=nrows, header=header, skiprows=skiprows, dayfirst=dayfirst)
+        if pd.__version__ < '2.0':
+            kw['infer_datetime_format'] = infer_datetime_format
+        df = pd.read_csv(fl, **kw)
     elif fl.endswith('.pkl'):
         fp = open(fl, 'rb')#'rb')
         df = pickle.load(fp)

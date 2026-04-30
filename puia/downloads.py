@@ -12,7 +12,10 @@ from pandas._libs.tslibs.timestamps import Timestamp
 from tqdm import tqdm
 from multiprocessing import Pool
 from time import sleep
-from scipy.integrate import cumtrapz
+try:
+    from scipy.integrate import cumulative_trapezoid as cumtrapz
+except ImportError:
+    from scipy.integrate import cumtrapz
 from scipy.signal import stft
 from functools import partial
 from fnmatch import fnmatch

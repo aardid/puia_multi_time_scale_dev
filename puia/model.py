@@ -49,7 +49,7 @@ from sklearn.svm import SVC
 
 # package imports
 from .utilities import datetimeify, load_dataframe, save_dataframe, makedir
-from .data import SeismicData, GeneralData
+from .data import SeismicData, GeneralData, MultiSourceData
 from .features import Feature, FeaturesSta, FeaturesMulti, _drop_features
 #from forecast import *
 
@@ -128,12 +128,13 @@ def train_one_model(fM, ys, Nfts, modeldir, classifier, retrain, random_seed, me
     '''
     # undersample data
     # ys=yss['label']
-    rus=RandomUnderSampler(method, random_state=random_state+random_seed)
+    rus=RandomUnderSampler(sampling_strategy=method, random_state=random_state+random_seed)
     # fMyss=pd.concat([fM,yss],axis=1)    # DED temporary concat for co-sampling
     fMt,yst=rus.fit_resample(fM,ys['label'])
     # ysst=fMt[yss.columns]               # DED split off label DF post sampling (for inspection)
     # fMt=fMt.drop(columns=yss.columns)   # DED split off feature matrix
-    yst=pd.Series(yst>0, index=range(len(yst)))
+    yst=pd.Series(np.array(yst)>0, index=range(len(yst)))
+    fMt=fMt.reset_index(drop=True)
     fMt.index=yst.index
 
     # find significant features
@@ -361,7 +362,7 @@ class ForecastModel(object):
     """
     def __init__(self, window, overlap, look_forward, data, root, data_streams=[], savefile_type='pkl',
                  feature_dir=None, data_dir=None, forecast_dir=None, model_dir=None, plot_dir=None,
-                 scales=None):
+                 scales=None, data_sources=None):
         # file access paths
         self.savefile_type=savefile_type
         self.root_dir='/'.join(getfile(currentframe()).split(os.sep)[:-2])
@@ -378,9 +379,13 @@ class ForecastModel(object):
         self.scales=scales
 
         # load input data
-        self.data_streams=data_streams if data_streams else GeneralData(data, 'seismic', data_dir=data_dir, headers_only=True)
+        self.data_sources=data_sources
         self._data=data
-        self._parse_data(data)
+        if data_sources is not None:
+            self._parse_multi_source_data(data, data_sources)
+        else:
+            self.data_streams=data_streams if data_streams else GeneralData(data, 'seismic', data_dir=data_dir, headers_only=True)
+            self._parse_data(data)
 
         # feature specification
         self.ft=Feature(self, window, overlap, look_forward, feature_dir, scales=scales)
@@ -396,6 +401,10 @@ class ForecastModel(object):
     def _parse_data(self, data):
         self.stations=[data,]
         self.data=SeismicData(data,self,data_dir=self.data_dir, transforms=self.data_streams)
+    def _parse_multi_source_data(self, station, data_sources):
+        self.stations=[station,]
+        self.data=MultiSourceData(station, data_sources, parent=self, data_dir=self.data_dir)
+        self.data_streams=self.data.data_streams
     def _detect_model(self):
         """ Checks whether and what models have already been run.
         """
@@ -853,7 +862,8 @@ class ForecastModel(object):
             root=self.root+'_hires'
         _fm=ForecastModel(self.ft.window, 1., self.ft.look_forward, data=self.data.station,
             data_streams=self.data_streams, root=root, savefile_type=self.savefile_type,
-            feature_dir=self.ft.feat_dir, data_dir=self.data_dir, scales=self.scales)
+            feature_dir=self.ft.feat_dir, data_dir=self.data_dir, scales=self.scales,
+            data_sources=self.data_sources)
         # _fm.compute_only_features=list(set([ft.split('__')[1] for ft in self._collect_features()[0]]))
         if type(self) is MultiDataForecastModel:
             _fm.data=self.data

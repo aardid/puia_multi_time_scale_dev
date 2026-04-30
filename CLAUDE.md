@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is puia
 
-puia is a Python library for ML-based volcanic eruption forecasting. It transforms raw seismic time series into tsfresh feature matrices, trains ensembles of classifiers (DT, RF, SVM, etc.), and produces probabilistic eruption forecasts via consensus voting. It supports single-volcano, multi-volcano, and transfer-learning workflows.
+puia is a Python library for ML-based volcanic eruption forecasting. It transforms raw time series (seismic, gas, GNSS, temperature, etc.) into tsfresh feature matrices, trains ensembles of classifiers (DT, RF, SVM, etc.), and produces probabilistic eruption forecasts via consensus voting. It supports single-volcano, multi-volcano, multi-source data, multi-resolution scales, and transfer-learning workflows.
 
 ## Running tests
 
@@ -14,6 +14,12 @@ python -c "from puia.tests import run_tests; run_tests()"
 
 # Multi-scale feature tests (requires real data at U:\Research\...\data)
 python test_multiscale.py
+
+# Multi-source data smoke tests (39 tests: data loading, merging, transforms, backward compat)
+python test_multidata.py
+
+# Multi-source + multi-scale end-to-end training/forecast (requires COPZ data)
+python test_multidata_train.py
 ```
 
 There is no package installer, linter, or CI pipeline. The library is used via direct imports from scripts in the repo root.
@@ -39,7 +45,9 @@ Raw seismic CSV (10-min intervals) → SeismicData.df
 
 ### Key modules in `puia/`
 
-- **`data.py`** — `SeismicData` loads `{station}_seismic_data.csv` and `{station}_eruptive_periods.txt` from data_dir. `get_data(ti, tf)` returns a DataFrame slice. Transforms are applied lazily via `_compute_transforms()`.
+- **`data.py`** — Data loading classes:
+  - `SeismicData`: loads `{station}_seismic_data.csv` and `{station}_eruptive_periods.txt` from data_dir. `get_data(ti, tf)` returns a DataFrame slice. Transforms are applied lazily via `_compute_transforms()`.
+  - `MultiSourceData`: loads multiple `{station}_{source_type}_data.csv` files (seismic, gas, gnss, temperature, etc.), merges them into a single DataFrame with `{source_type}_{column}` prefixed columns. Coarser data (e.g., daily GNSS) is forward-filled onto the finest time grid (e.g., 10-min seismic). Supports transforms. Used via `data_sources` parameter on `ForecastModel`.
 
 - **`features.py`** — Three layers:
   - `Feature` (line ~807): Core feature extraction engine. Owns windowing (`_construct_windows`), tsfresh extraction (`_extract_features`), labeling (`_get_label`), and per-year caching. Supports multi-resolution scales via `scales` parameter.
@@ -90,11 +98,12 @@ Real seismic data and pre-computed features live outside this repo:
 
 These paths are passed via `data_dir` and `feature_dir` parameters to model constructors.
 
-## Common model usage pattern
+## Common model usage patterns
+
+### Single-source (legacy seismic-only)
 
 ```python
-from puia.model import ForecastModel, MultiVolcanoForecastModel
-
+from puia.model import ForecastModel
 fm = ForecastModel(
     window=2., overlap=0.75, look_forward=2.,
     data='WIZ', root='my_run',
@@ -106,6 +115,28 @@ fm.train(ti='2012-01-01', tf='2019-01-01', Ncl=300, Nfts=20, classifier='DT',
          drop_features=['linear_trend_timewise', 'agg_linear_trend'])
 forecast = fm.forecast(ti=datetimeify('2019-12-01'), tf=datetimeify('2019-12-15'))
 ```
+
+### Multi-source (seismic + gas + GNSS, etc.)
+
+```python
+from puia.model import ForecastModel
+fm = ForecastModel(
+    window=2., overlap=0.75, look_forward=2.,
+    data='COPZ', root='copz_multisource',
+    data_dir=DATA_DIR, feature_dir=FEAT_DIR,
+    data_sources={
+        'seismic': ['rsam', 'dsar'],
+        'gas': ['flux'],
+        'gnss': ['east', 'north', 'up'],  # optional
+    },
+    scales=[2, 14]  # optional multi-resolution
+)
+fm.train(ti='2018-06-01', tf='2020-12-31', Ncl=300, Nfts=20, classifier='DT',
+         drop_features=['linear_trend_timewise', 'agg_linear_trend'])
+forecast = fm.forecast(ti=datetimeify('2020-06-10'), tf=datetimeify('2020-06-20'))
+```
+
+The `data_sources` parameter replaces `data_streams` when using multiple source types. Each source type maps to a CSV file `{station}_{source_type}_data.csv` in the data directory. When `data_sources` is provided, `data_streams` is auto-generated with prefixed names (e.g., `seismic_rsam`, `gas_flux`).
 
 Note: `forecast()` requires datetime objects (use `datetimeify()`), while `train()` accepts strings.
 
