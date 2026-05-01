@@ -7,7 +7,7 @@ Three configurations:
   A) Seismic only (rsam, dsar)
   B) Seismic + gas (rsam, dsar, flux)
   C) Seismic + gas + GNSS (rsam, dsar, flux, east, north, up)
-All use scales=[2, 14] for multi-resolution.
+All use scales=[2, 14, 60] for multi-resolution.
 """
 
 import sys, os
@@ -30,7 +30,7 @@ FCST_TI = datetimeify('2021-01-01')
 FCST_TF = datetimeify('2021-12-31')
 NCL = 100
 NFTS = 20
-SCALES = [2, 14]
+SCALES = [2, 14, 60]
 CLASSIFIER = 'DT'
 DROP = ['linear_trend_timewise', 'agg_linear_trend']
 
@@ -62,7 +62,7 @@ def run_config(name, cfg):
 
     fm = ForecastModel(
         window=2., overlap=0.75, look_forward=2.,
-        data='COPZ', root=f'comparison_{name}',
+        data='COPZ', root=f'comparison3s_{name}',
         data_dir=DATA_DIR, feature_dir=FEAT_DIR,
         data_sources=cfg['data_sources'],
         scales=SCALES,
@@ -118,8 +118,12 @@ def plot_comparison(forecasts):
 
     plt.suptitle('COPZ Multi-source Forecast Comparison (2021, out-of-sample)', fontsize=13)
     plt.tight_layout()
-    outfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'comparison_forecast_2021.png')
-    plt.savefig(outfile, dpi=150)
+    try:
+        outfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'comparison_3scales_forecast_2021.png')
+        plt.savefig(outfile, dpi=150)
+    except (FileNotFoundError, OSError):
+        outfile = os.path.join(os.path.expanduser('~'), 'comparison_3scales_forecast_2021.png')
+        plt.savefig(outfile, dpi=150)
     print(f"\nPlot saved to {outfile}")
     plt.close()
 

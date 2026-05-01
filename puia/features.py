@@ -1104,10 +1104,9 @@ class Feature(object):
             dfs = []
             for i in range(i0, i1):
                 dfi = df[:].iloc[i*(_iw-_io):i*(_iw-_io)+_iw]
-                try:
-                    dfi['id'] = pd.Series(np.ones(_iw, dtype=int)*i, index=dfi.index)
-                except ValueError:
-                    print('this shouldn\'t be happening')
+                if len(dfi) == 0:
+                    continue
+                dfi['id'] = i
                 dfs.append(dfi)
             df = pd.concat(dfs)
             window_dates = [ti + i*_dto for i in range(Nw)]
@@ -1122,10 +1121,9 @@ class Feature(object):
                 if _resample is not None:
                     dfi = dfi.resample(_resample).median()
                 dfi = dfi.iloc[:]
-                try:
-                    dfi['id'] = pd.Series(np.ones(_iw, dtype=int)*i, index=dfi.index)
-                except ValueError:
-                    print('this shouldn\'t be happening')
+                if len(dfi) == 0:
+                    continue
+                dfi['id'] = i
                 dfs.append(dfi)
             df = pd.concat(dfs)
             window_dates = indx
